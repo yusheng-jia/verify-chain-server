@@ -5,7 +5,11 @@
  * 包括设备注册、消息验证、管理接口等
  */
 
-const { SECURITY_CONFIG, SERVICE_INFO } = require("../config/constants");
+const {
+  SECURITY_CONFIG,
+  SERVICE_INFO,
+  SUPPORTED_PLATFORMS,
+} = require("../config/constants");
 const deviceStorage = require("../services/deviceStorage");
 const nonceManager = require("../services/nonceManager");
 const certificateVerifier = require("../services/certificateVerifier");
@@ -39,15 +43,19 @@ function registerDevice(req, res) {
 
   try {
     // 兼容原有的certChain格式和新的certificateChain格式
-    const { deviceId, certificateChain, certChain, publicKey, challenge } =
+    const { deviceId, platform, certificateChain, certChain, challenge } =
       req.body;
 
     console.log("🔍 DEBUG: Extracted parameters:");
     console.log(`   deviceId: ${deviceId}`);
+    console.log(`   platform: ${platform}`);
     console.log(`   certChain: ${certChain ? "[present]" : "[missing]"}`);
     console.log(
       `   certificateChain: ${certificateChain ? "[present]" : "[missing]"}`,
     );
+
+    const normalizedPlatform =
+      typeof platform === "string" ? platform.toLowerCase() : platform;
 
     // 确定使用哪个证书链参数（优先使用certChain以保持向后兼容性）
     const actualCertChain = certChain || certificateChain;
@@ -66,6 +74,22 @@ function registerDevice(req, res) {
       return res.status(400).json({
         success: false,
         error: "deviceId is required",
+      });
+    }
+
+    if (!platform || typeof platform !== "string") {
+      return res.status(400).json({
+        success: false,
+        error: "platform is required and must be a string",
+        supportedPlatforms: SUPPORTED_PLATFORMS,
+      });
+    }
+
+    if (!SUPPORTED_PLATFORMS.includes(normalizedPlatform)) {
+      return res.status(400).json({
+        success: false,
+        error: `Unsupported platform: ${platform}`,
+        supportedPlatforms: SUPPORTED_PLATFORMS,
       });
     }
 
@@ -96,6 +120,7 @@ function registerDevice(req, res) {
 
     // 验证证书链和提取设备信息
     const verificationResult = certificateVerifier.verifyAndExtractDeviceInfo({
+      platform: normalizedPlatform,
       certificateChain: actualCertChain,
     });
 
@@ -109,6 +134,7 @@ function registerDevice(req, res) {
         success: false,
         error: verificationResult.error,
         deviceId: deviceId,
+        platform: normalizedPlatform,
         certificateChainLength: actualCertChain.length,
       };
 
@@ -158,6 +184,7 @@ function registerDevice(req, res) {
     // 存储设备信息
     const deviceInfo = {
       deviceId: deviceId,
+      platform: normalizedPlatform,
       publicKey: verificationResult.publicKey,
       certificateChain: actualCertChain, // 修复：使用actualCertChain而不是certificateChain
       keyInfo: verificationResult.keyInfo,
@@ -193,6 +220,7 @@ function registerDevice(req, res) {
     res.json({
       success: true,
       deviceId: deviceId,
+      platform: normalizedPlatform,
       action: isUpdate ? "updated" : "registered",
       registrationTime: deviceInfo.registrationTime,
       previousRegistrationTime: isUpdate
@@ -220,10 +248,12 @@ function registerDevice(req, res) {
  */
 function sendMessage(req, res) {
   try {
-    const { deviceId, phone, timestamp, nonce, signature } = req.body;
+    const { deviceId, platform, phone, timestamp, nonce, signature } = req.body;
+    const normalizedPlatform =
+      typeof platform === "string" ? platform.toLowerCase() : platform;
 
     console.log(
-      `📨 Message verification request from device: ${deviceId}, phone: ${phone}`,
+      `📨 Message verification request from device: ${deviceId}, platform: ${normalizedPlatform}, phone: ${phone}`,
     );
 
     // 参数验证
@@ -249,6 +279,22 @@ function sendMessage(req, res) {
       });
     }
 
+    if (!platform || typeof platform !== "string") {
+      return res.status(400).json({
+        success: false,
+        error: "platform is required and must be a string",
+        supportedPlatforms: SUPPORTED_PLATFORMS,
+      });
+    }
+
+    if (!SUPPORTED_PLATFORMS.includes(normalizedPlatform)) {
+      return res.status(400).json({
+        success: false,
+        error: `Unsupported platform: ${platform}`,
+        supportedPlatforms: SUPPORTED_PLATFORMS,
+      });
+    }
+
     // 获取设备信息
     const deviceInfo = deviceStorage.getDeviceInfo(deviceId);
     if (!deviceInfo) {
@@ -256,6 +302,18 @@ function sendMessage(req, res) {
       return res.status(404).json({
         success: false,
         error: "Device not registered",
+      });
+    }
+
+    if (deviceInfo.platform !== normalizedPlatform) {
+      console.log(
+        `❌ Platform mismatch for device ${deviceId}: expected ${deviceInfo.platform}, received ${normalizedPlatform}`,
+      );
+      return res.status(400).json({
+        success: false,
+        error: "Platform mismatch for registered device",
+        registeredPlatform: deviceInfo.platform,
+        requestPlatform: normalizedPlatform,
       });
     }
 
@@ -331,6 +389,7 @@ function sendMessage(req, res) {
     const response = {
       success: true,
       deviceId: deviceId,
+      platform: normalizedPlatform,
       phone: phone,
       timestamp: new Date(timestamp).toISOString(),
       nonce: nonce,
@@ -372,6 +431,7 @@ function getDevices(req, res) {
     // 返回设备摘要信息（不包含敏感信息）
     const deviceSummaries = devices.map((device) => ({
       deviceId: device.deviceId,
+      platform: device.platform,
       registrationTime: device.registrationTime,
       securityLevel: device.securityLevel,
       keyInfo: device.keyInfo,
@@ -432,6 +492,11 @@ function getSystemStatus(req, res) {
       },
       devices: {
         total: devices.length,
+        byPlatform: devices.reduce((acc, device) => {
+          acc[device.platform || "unknown"] =
+            (acc[device.platform || "unknown"] || 0) + 1;
+          return acc;
+        }, {}),
         bySecurityLevel: devices.reduce((acc, device) => {
           acc[device.securityLevel] = (acc[device.securityLevel] || 0) + 1;
           return acc;

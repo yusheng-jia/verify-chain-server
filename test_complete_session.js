@@ -77,6 +77,7 @@ async function registerDevice() {
   const challenge = generateNonce();
   const registrationData = {
     deviceId: TEST_DEVICE_ID,
+    platform: "android",
     certChain: TEST_CERT_CHAIN,
     challenge: challenge,
   };
@@ -113,6 +114,7 @@ async function testSendMessage(attempt = 1) {
 
   const messageData = {
     deviceId: TEST_DEVICE_ID,
+    platform: "android",
     phone: TEST_PHONE,
     timestamp: timestamp,
     nonce: nonce,

@@ -105,6 +105,7 @@ async function testDeviceRegistration() {
 
   const registrationData = {
     deviceId: TEST_DEVICE_ID,
+    platform: "android",
     certChain: TEST_CERT_CHAIN, // 使用兼容的原始格式
     challenge: crypto.randomBytes(32).toString("base64"), // 随机challenge
   };
@@ -138,6 +139,7 @@ async function testMessageSigning() {
 
   const messageData = {
     deviceId: TEST_DEVICE_ID,
+    platform: "android",
     phone: TEST_PHONE,
     timestamp: timestamp,
     nonce: nonce,

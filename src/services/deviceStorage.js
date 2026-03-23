@@ -18,6 +18,7 @@ function storeDeviceInfo(deviceId, deviceInfo) {
   // 确保deviceInfo包含必要的字段
   const completeDeviceInfo = {
     deviceId,
+    platform: deviceInfo.platform || "unknown",
     publicKey: deviceInfo.publicKey, // 存储公钥用于后续签名验证
     certificateChain: deviceInfo.certificateChain,
     keyInfo: deviceInfo.keyInfo,
@@ -53,8 +54,11 @@ function getDeviceInfo(deviceId) {
 function getAllDevices() {
   return Array.from(verifiedDevices.entries()).map(([deviceId, info]) => ({
     deviceId,
+    platform: info.platform || "unknown",
     registrationTime: info.registrationTime,
     isVerified: info.isVerified,
+    securityLevel: info.securityLevel,
+    keyInfo: info.keyInfo,
     certificateInfo: {
       subject: info.certificateInfo?.subject || "Unknown",
       issuer: info.certificateInfo?.issuer || "Unknown",

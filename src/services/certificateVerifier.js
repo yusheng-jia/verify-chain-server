@@ -10,6 +10,7 @@ const crypto = require("crypto");
 const {
   GOOGLE_HARDWARE_ATTESTATION_ROOT_CERTS,
   CERTIFICATE_VALIDATION_CONFIG,
+  IOS_CERTIFICATE_VALIDATION_CONFIG,
   SERVICE_INFO,
 } = require("../config/constants");
 
@@ -310,6 +311,221 @@ function parseAttestationExtension(cert) {
   }
 }
 
+function parseCertificateChain(certChain) {
+  if (!certChain || certChain.length === 0) {
+    return {
+      isValid: false,
+      error: "Certificate chain is empty",
+    };
+  }
+
+  console.log(
+    `📋 Certificate chain contains ${certChain.length} certificates`,
+  );
+
+  for (let i = 0; i < certChain.length; i++) {
+    if (!certChain[i] || typeof certChain[i] !== "string") {
+      return {
+        isValid: false,
+        error: `Certificate at index ${i} is not a valid string`,
+      };
+    }
+
+    if (certChain[i].trim().length === 0) {
+      return {
+        isValid: false,
+        error: `Certificate at index ${i} is empty`,
+      };
+    }
+  }
+
+  const certificates = [];
+
+  for (let i = 0; i < certChain.length; i++) {
+    try {
+      console.log(`🔄 Parsing certificate ${i + 1}/${certChain.length}...`);
+      const cert = createCertificateFromPem(certChain[i]);
+      certificates.push(cert);
+      console.log(`✅ Certificate ${i + 1} parsed successfully`);
+    } catch (error) {
+      console.error(`❌ Failed to parse certificate at index ${i}:`);
+      console.error(`   Error: ${error.message}`);
+      console.error(`   Certificate length: ${certChain[i]?.length || 0} chars`);
+
+      return {
+        isValid: false,
+        error: `Failed to parse certificate at index ${i}: ${error.message}`,
+        certificateIndex: i,
+        certificatePreview: certChain[i]?.substring(0, 100) + "...",
+        totalCertificates: certChain.length,
+      };
+    }
+  }
+
+  return {
+    isValid: true,
+    certificates,
+  };
+}
+
+function validateCertificateChainDates(certificates) {
+  for (let i = 0; i < certificates.length; i++) {
+    const validityCheck = validateCertificateValidity(certificates[i]);
+    if (!validityCheck.isValid) {
+      return {
+        isValid: false,
+        error: `Certificate validity check failed at index ${i}: ${validityCheck.error}`,
+      };
+    }
+  }
+
+  return {
+    isValid: true,
+  };
+}
+
+function validateCertificateChainSignatures(certificates) {
+  for (let i = 0; i < certificates.length - 1; i++) {
+    const cert = certificates[i];
+    const issuerCert = certificates[i + 1];
+
+    console.log(
+      `🔗 Verifying certificate ${i}: ${cert.subject.getField("CN")?.value || "N/A"}`,
+    );
+    console.log(
+      `   Issued by: ${issuerCert.subject.getField("CN")?.value || "N/A"}`,
+    );
+
+    if (!verifyCertificateSignature(cert, issuerCert)) {
+      return {
+        isValid: false,
+        error: `Certificate signature verification failed at index ${i}`,
+      };
+    }
+  }
+
+  return {
+    isValid: true,
+  };
+}
+
+function getCertificateIdentityString(cert) {
+  return [
+    cert.subject.getField("CN")?.value || "",
+    cert.subject.getField("O")?.value || "",
+    cert.issuer.getField("CN")?.value || "",
+    cert.issuer.getField("O")?.value || "",
+  ]
+    .join(" ")
+    .trim();
+}
+
+function buildLeafCertificateSummary(cert) {
+  return {
+    subject: cert.subject.getField("CN")?.value || "N/A",
+    issuer: cert.issuer.getField("CN")?.value || "N/A",
+    validFrom: cert.validity.notBefore.toISOString(),
+    validUntil: cert.validity.notAfter.toISOString(),
+    serialNumber: cert.serialNumber,
+    fingerprint: crypto
+      .createHash("sha256")
+      .update(forge.asn1.toDer(forge.pki.certificateToAsn1(cert)).getBytes())
+      .digest("hex")
+      .toUpperCase(),
+  };
+}
+
+function verifyIosCertificateChain(certChain) {
+  try {
+    console.log(`🍎 Starting iOS certificate chain verification...`);
+
+    const parsedChain = parseCertificateChain(certChain);
+    if (!parsedChain.isValid) {
+      return parsedChain;
+    }
+
+    const certificates = parsedChain.certificates;
+    const leafCert = certificates[0];
+    const lastCert = certificates[certificates.length - 1];
+
+    if (certificates.length < 2) {
+      return {
+        isValid: false,
+        error:
+          "iOS certificate chain must contain at least leaf and intermediate certificates",
+      };
+    }
+
+    const dateValidation = validateCertificateChainDates(certificates);
+    if (!dateValidation.isValid) {
+      return dateValidation;
+    }
+
+    const signatureValidation =
+      validateCertificateChainSignatures(certificates);
+    if (!signatureValidation.isValid) {
+      return signatureValidation;
+    }
+
+    const hasAppleIssuer = certificates.some((cert) =>
+      IOS_CERTIFICATE_VALIDATION_CONFIG.TRUSTED_ISSUER_PATTERNS.some(
+        (pattern) => pattern.test(getCertificateIdentityString(cert)),
+      ),
+    );
+
+    if (!hasAppleIssuer) {
+      return {
+        isValid: false,
+        error: "iOS certificate chain is not issued by an Apple certificate authority",
+      };
+    }
+
+    const hasAppleAttestationExtension = (leafCert.extensions || []).some(
+      (ext) =>
+        typeof ext.id === "string" &&
+        ext.id.startsWith(
+          IOS_CERTIFICATE_VALIDATION_CONFIG.APPLE_APP_ATTEST_OID_PREFIX,
+        ),
+    );
+
+    if (!hasAppleAttestationExtension) {
+      return {
+        isValid: false,
+        error: "Leaf certificate does not contain an Apple attestation extension",
+      };
+    }
+
+    const rootLooksTrusted =
+      lastCert.subject.hash === lastCert.issuer.hash ||
+      IOS_CERTIFICATE_VALIDATION_CONFIG.TRUSTED_ROOT_PATTERNS.some((pattern) =>
+        pattern.test(getCertificateIdentityString(lastCert)),
+      );
+
+    return {
+      isValid: true,
+      chainLength: certificates.length,
+      validationMethod: rootLooksTrusted
+        ? "apple_root_or_self_signed"
+        : "apple_intermediate_chain",
+      leafCertificate: buildLeafCertificateSummary(leafCert),
+      attestation: {
+        success: true,
+        platform: "ios",
+        certificateAuthority: "Apple",
+        attestationType: "apple_app_attestation",
+        appleOidPrefix:
+          IOS_CERTIFICATE_VALIDATION_CONFIG.APPLE_PUBLIC_OID_PREFIX,
+      },
+      isAppleAttestation: true,
+    };
+  } catch (error) {
+    return {
+      isValid: false,
+      error: `iOS certificate chain verification failed: ${error.message}`,
+    };
+  }
+}
+
 /**
  * 验证证书链（增强版本）
  * @param {string[]} certChain - PEM格式的证书链
@@ -318,60 +534,12 @@ function parseAttestationExtension(cert) {
 function verifyCertificateChain(certChain) {
   try {
     console.log(`🔍 Starting certificate chain verification...`);
-
-    if (!certChain || certChain.length === 0) {
-      return {
-        isValid: false,
-        error: "Certificate chain is empty",
-      };
+    const parsedChain = parseCertificateChain(certChain);
+    if (!parsedChain.isValid) {
+      return parsedChain;
     }
 
-    console.log(
-      `📋 Certificate chain contains ${certChain.length} certificates`,
-    );
-
-    // 验证证书链格式
-    for (let i = 0; i < certChain.length; i++) {
-      if (!certChain[i] || typeof certChain[i] !== "string") {
-        return {
-          isValid: false,
-          error: `Certificate at index ${i} is not a valid string`,
-        };
-      }
-
-      if (certChain[i].trim().length === 0) {
-        return {
-          isValid: false,
-          error: `Certificate at index ${i} is empty`,
-        };
-      }
-    }
-
-    const certificates = [];
-
-    // 解析所有证书
-    for (let i = 0; i < certChain.length; i++) {
-      try {
-        console.log(`🔄 Parsing certificate ${i + 1}/${certChain.length}...`);
-        const cert = createCertificateFromPem(certChain[i]);
-        certificates.push(cert);
-        console.log(`✅ Certificate ${i + 1} parsed successfully`);
-      } catch (error) {
-        console.error(`❌ Failed to parse certificate at index ${i}:`);
-        console.error(`   Error: ${error.message}`);
-        console.error(
-          `   Certificate length: ${certChain[i]?.length || 0} chars`,
-        );
-
-        return {
-          isValid: false,
-          error: `Failed to parse certificate at index ${i}: ${error.message}`,
-          certificateIndex: i,
-          certificatePreview: certChain[i]?.substring(0, 100) + "...",
-          totalCertificates: certChain.length,
-        };
-      }
-    }
+    const certificates = parsedChain.certificates;
 
     const leafCert = certificates[0];
     console.log(
@@ -381,30 +549,15 @@ function verifyCertificateChain(certChain) {
       `🍃 Leaf certificate subject: ${leafCert.subject.getField("CN")?.value || "N/A"}`,
     );
 
-    // 验证叶子证书的有效期
-    const validityCheck = validateCertificateValidity(leafCert);
-    if (!validityCheck.isValid) {
-      return validityCheck;
+    const dateValidation = validateCertificateChainDates(certificates);
+    if (!dateValidation.isValid) {
+      return dateValidation;
     }
 
-    // 验证证书链的连续性
-    for (let i = 0; i < certificates.length - 1; i++) {
-      const cert = certificates[i];
-      const issuerCert = certificates[i + 1];
-
-      console.log(
-        `🔗 Verifying certificate ${i}: ${cert.subject.getField("CN")?.value || "N/A"}`,
-      );
-      console.log(
-        `   Issued by: ${issuerCert.subject.getField("CN")?.value || "N/A"}`,
-      );
-
-      if (!verifyCertificateSignature(cert, issuerCert)) {
-        return {
-          isValid: false,
-          error: `Certificate signature verification failed at index ${i}`,
-        };
-      }
+    const signatureValidation =
+      validateCertificateChainSignatures(certificates);
+    if (!signatureValidation.isValid) {
+      return signatureValidation;
     }
 
     // 验证根证书 - 使用灵活的验证策略
@@ -542,20 +695,7 @@ function verifyCertificateChain(certChain) {
       isValid: true,
       chainLength: certificates.length,
       validationMethod: validationMethod,
-      leafCertificate: {
-        subject: leafCert.subject.getField("CN")?.value || "N/A",
-        issuer: leafCert.issuer.getField("CN")?.value || "N/A",
-        validFrom: leafCert.validity.notBefore.toISOString(),
-        validUntil: leafCert.validity.notAfter.toISOString(),
-        serialNumber: leafCert.serialNumber,
-        fingerprint: crypto
-          .createHash("sha256")
-          .update(
-            forge.asn1.toDer(forge.pki.certificateToAsn1(leafCert)).getBytes(),
-          )
-          .digest("hex")
-          .toUpperCase(),
-      },
+      leafCertificate: buildLeafCertificateSummary(leafCert),
       attestation: attestationResult,
       isGoogleHardwareAttestation: isGoogleRoot,
     };
@@ -586,8 +726,16 @@ function extractPublicKeyFromCertificate(certPem) {
     console.log(`   Public key length: ${publicKeyPem.length} chars`);
     console.log(`   Public key preview: ${publicKeyPem.substring(0, 100)}...`);
 
-    const keyType = cert.publicKey.n ? "RSA" : "Unknown";
-    const keySize = cert.publicKey.n ? cert.publicKey.n.bitLength() : 0;
+    const keyType = cert.publicKey.n
+      ? "RSA"
+      : cert.publicKey.Q
+        ? "EC"
+        : "Unknown";
+    const keySize = cert.publicKey.n
+      ? cert.publicKey.n.bitLength()
+      : cert.publicKey.Q
+        ? cert.publicKey.Q.x?.bitLength?.() || 256
+        : 0;
 
     console.log(`📋 Key info: ${keyType} ${keySize}bit`);
 
@@ -613,12 +761,15 @@ function extractPublicKeyFromCertificate(certPem) {
  * @returns {object} 验证和提取结果
  */
 function verifyAndExtractDeviceInfo(deviceData) {
-  const { certificateChain } = deviceData;
+  const { certificateChain, platform } = deviceData;
   console.log(`🔍 Starting certificate verification for device`);
+  console.log(`   Platform: ${platform}`);
   console.log(`   Certificate chain length: ${certificateChain?.length || 0}`);
 
-  // 1. 验证证书链
-  const chainVerification = verifyCertificateChain(certificateChain);
+  const chainVerification =
+    platform === "ios"
+      ? verifyIosCertificateChain(certificateChain)
+      : verifyCertificateChain(certificateChain);
   if (!chainVerification.isValid) {
     console.error(
       `❌ Certificate chain verification failed: ${chainVerification.error}`,
@@ -652,7 +803,8 @@ function verifyAndExtractDeviceInfo(deviceData) {
       type: publicKeyResult.keyType,
       size: publicKeyResult.keySize,
     },
-    securityLevel: "hardware",
+    platform: platform || "android",
+    securityLevel: platform === "ios" ? "apple_attested" : "hardware",
   };
 
   // 调试：显示最终结果
@@ -673,6 +825,7 @@ module.exports = {
   validateCertificateValidity,
   parseAttestationExtension,
   verifyCertificateChain,
+  verifyIosCertificateChain,
   extractPublicKeyFromCertificate,
   verifyAndExtractDeviceInfo,
 };
