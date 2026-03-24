@@ -47,29 +47,23 @@ app.get("/status", routeHandlers.getSystemStatus);
 // 🚀 启动服务器
 app.listen(PORT, () => {
   console.log(`\n🚀 ${SERVICE_INFO.name}`);
-  console.log(`📡 Server running on port ${PORT}`);
-  console.log(`🔗 Health check: http://localhost:${PORT}/health`);
-  console.log(`🎯 Issue challenge: POST http://localhost:${PORT}/challenge`);
-  console.log(`📝 Register device: POST http://localhost:${PORT}/register`);
-  console.log(`✅ Send message: POST http://localhost:${PORT}/sendMessage`);
-  console.log(`📊 List devices: GET http://localhost:${PORT}/devices`);
-  console.log(`🔒 Nonce stats: GET http://localhost:${PORT}/nonces`);
-  console.log(`📈 System status: GET http://localhost:${PORT}/status`);
-  console.log("\n🔐 Security Configuration:");
+  console.log(`📡 Listening on http://localhost:${PORT}`);
+  console.log("🔗 Endpoints:");
+  console.log(`   GET  /health`);
+  console.log(`   POST /challenge`);
+  console.log(`   POST /register`);
+  console.log(`   POST /sendMessage`);
+  console.log(`   GET  /devices`);
+  console.log(`   GET  /nonces`);
+  console.log(`   GET  /status`);
+  console.log("🔐 Security:");
   console.log(
-    `   ⏰ Timestamp tolerance: ${SECURITY_CONFIG.TIMESTAMP_TOLERANCE / 1000} seconds`,
+    `   Timestamp tolerance: ${SECURITY_CONFIG.TIMESTAMP_TOLERANCE / 1000}s`,
   );
   console.log(
-    `   🔒 Nonce expiry: ${SECURITY_CONFIG.NONCE_EXPIRY_TIME / (60 * 60 * 1000)} hours`,
+    `   Nonce expiry: ${SECURITY_CONFIG.NONCE_EXPIRY_TIME / (60 * 60 * 1000)}h`,
   );
   console.log(
-    `   🧹 Cleanup interval: ${SECURITY_CONFIG.NONCE_CLEANUP_INTERVAL / (60 * 1000)} minutes`,
+    `   Challenge expiry: ${SECURITY_CONFIG.CHALLENGE_EXPIRY_TIME / (60 * 1000)}m\n`,
   );
-  console.log("\n📁 Modular Architecture:");
-  console.log(
-    "   🔧 Services: deviceStorage, nonceManager, certificateVerifier, signatureVerifier",
-  );
-  console.log("   ⚙️ Configuration: constants.js");
-  console.log("   🌐 Routes: handlers.js");
-  console.log("   ✅ Ready for iOS verification extension\n");
 });

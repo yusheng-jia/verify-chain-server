@@ -94,9 +94,6 @@ function issueChallenge(req, res) {
  * 设备注册端点（兼容原API格式）
  */
 function registerDevice(req, res) {
-  console.log("🔍 DEBUG: registerDevice function called");
-  console.log("🔍 DEBUG: Request body:", JSON.stringify(req.body, null, 2));
-
   try {
     // 兼容原有的certChain格式和新的certificateChain格式
     const {
@@ -109,32 +106,13 @@ function registerDevice(req, res) {
       attestationObject,
     } = req.body;
 
-    console.log("🔍 DEBUG: Extracted parameters:");
-    console.log(`   deviceId: ${deviceId}`);
-    console.log(`   platform: ${platform}`);
-    console.log(`   certChain: ${certChain ? "[present]" : "[missing]"}`);
-    console.log(
-      `   certificateChain: ${certificateChain ? "[present]" : "[missing]"}`,
-    );
-    console.log(`   keyId: ${keyId ? "[present]" : "[missing]"}`);
-    console.log(
-      `   attestationObject: ${attestationObject ? "[present]" : "[missing]"}`,
-    );
-
     const normalizedPlatform =
       typeof platform === "string" ? platform.toLowerCase() : platform;
 
     // 确定使用哪个证书链参数（优先使用certChain以保持向后兼容性）
     const actualCertChain = certChain || certificateChain;
 
-    console.log(
-      `🔍 DEBUG: actualCertChain: ${actualCertChain ? "[present]" : "[missing]"}`,
-    );
-
     console.log(`📱 Device registration request: ${deviceId}`);
-    console.log(
-      `📊 Request format: ${certChain ? "Original (certChain)" : "New (certificateChain)"}`,
-    );
 
     // 验证请求参数
     if (!deviceId) {
@@ -165,9 +143,6 @@ function registerDevice(req, res) {
     const isUpdate = !!existingDevice;
     if (existingDevice) {
       console.log(`🔄 Device already exists, will update: ${deviceId}`);
-      console.log(
-        `📊 Previous registration: ${existingDevice.registrationTime}`,
-      );
     }
 
     let verificationResult;
@@ -243,21 +218,28 @@ function registerDevice(req, res) {
         platform: normalizedPlatform,
       });
     } else {
-      if (challenge) {
-        const androidChallengeValidation = challengeManager.validateChallenge({
-          deviceId,
+      if (!challenge || typeof challenge !== "string") {
+        return res.status(400).json({
+          success: false,
+          error: "challenge is required for Android registration",
           platform: normalizedPlatform,
-          challenge,
+          step: "challenge_validation",
         });
+      }
 
-        if (!androidChallengeValidation.isValid) {
-          return res.status(400).json({
-            success: false,
-            error: androidChallengeValidation.error,
-            platform: normalizedPlatform,
-            step: "challenge_validation",
-          });
-        }
+      const androidChallengeValidation = challengeManager.validateChallenge({
+        deviceId,
+        platform: normalizedPlatform,
+        challenge,
+      });
+
+      if (!androidChallengeValidation.isValid) {
+        return res.status(400).json({
+          success: false,
+          error: androidChallengeValidation.error,
+          platform: normalizedPlatform,
+          step: "challenge_validation",
+        });
       }
 
       if (!actualCertChain) {
@@ -280,12 +262,10 @@ function registerDevice(req, res) {
         certificateChain: actualCertChain,
       });
 
-      if (challenge) {
-        challengeManager.consumeChallenge({
-          deviceId,
-          platform: normalizedPlatform,
-        });
-      }
+      challengeManager.consumeChallenge({
+        deviceId,
+        platform: normalizedPlatform,
+      });
     }
 
     if (!verificationResult.success) {
@@ -293,7 +273,6 @@ function registerDevice(req, res) {
         `❌ Certificate verification failed for ${deviceId}: ${verificationResult.error}`,
       );
 
-      // 提供更详细的错误信息，帮助客户端调试
       const errorResponse = {
         success: false,
         error: verificationResult.error,
@@ -302,7 +281,6 @@ function registerDevice(req, res) {
         certificateChainLength: actualCertChain?.length,
       };
 
-      // 如果有额外的调试信息，添加到响应中
       if (verificationResult.certificateIndex !== undefined) {
         errorResponse.failedCertificateIndex =
           verificationResult.certificateIndex;
@@ -314,36 +292,8 @@ function registerDevice(req, res) {
           verificationResult.certificatePreview;
       }
 
-      // 记录详细的调试信息
-      console.error(`📊 Certificate verification details:`);
-      console.error(`   Device ID: ${deviceId}`);
-      console.error(`   Certificate chain length: ${actualCertChain?.length}`);
-      console.error(`   Error: ${verificationResult.error}`);
-
-      if (actualCertChain?.length > 0) {
-        console.error(
-          `   First certificate preview: ${actualCertChain[0]?.substring(0, 100)}...`,
-        );
-      }
-
       return res.status(400).json(errorResponse);
     }
-
-    // 调试：显示验证结果
-    console.log(`🔍 DEBUG: verificationResult:`);
-    console.log(`   success: ${verificationResult.success}`);
-    console.log(
-      `   publicKey: ${verificationResult.publicKey ? "[present]" : "[missing]"}`,
-    );
-    if (verificationResult.publicKey) {
-      console.log(
-        `   publicKey length: ${verificationResult.publicKey.length} chars`,
-      );
-      console.log(
-        `   publicKey preview: ${verificationResult.publicKey.substring(0, 100)}...`,
-      );
-    }
-    console.log(`   keyInfo: ${JSON.stringify(verificationResult.keyInfo)}`);
 
     // 存储设备信息
     const deviceInfo = {
@@ -369,7 +319,6 @@ function registerDevice(req, res) {
       registrationTime: new Date().toISOString(),
     };
 
-    // 调试：显示将要存储的设备信息
     deviceStorage.storeDeviceInfo(deviceId, deviceInfo);
 
     const actionType = isUpdate ? "updated" : "registered";
@@ -379,10 +328,7 @@ function registerDevice(req, res) {
       `📋 Key info: ${deviceInfo.keyInfo.type} ${deviceInfo.keyInfo.size}bit`,
     );
     if (isUpdate && existingDevice) {
-      console.log(
-        `📊 Previous registration: ${existingDevice.registrationTime}`,
-      );
-      console.log(`📊 Updated registration: ${deviceInfo.registrationTime}`);
+      console.log(`📊 Registration updated: ${deviceInfo.registrationTime}`);
     }
 
     res.json({
@@ -555,7 +501,7 @@ function sendMessage(req, res) {
         assertionCounter: iosVerification.signCount,
       });
 
-      return res.json({
+      const response = {
         success: true,
         deviceId,
         platform: "ios",
@@ -572,23 +518,18 @@ function sendMessage(req, res) {
           verificationMode: iosVerification.verificationMode,
         },
         verificationTime: new Date().toISOString(),
-      });
-    }
+      };
 
-    // 调试：显示获取到的设备信息
-    console.log(`🔍 DEBUG: Retrieved deviceInfo for ${deviceId}:`);
-    console.log(`   deviceId: ${deviceInfo.deviceId}`);
-    console.log(
-      `   publicKey: ${deviceInfo.publicKey ? "[present]" : "[missing]"}`,
-    );
-    console.log(`   publicKey type: ${typeof deviceInfo.publicKey}`);
-    if (deviceInfo.publicKey && typeof deviceInfo.publicKey === "string") {
-      console.log(`   publicKey length: ${deviceInfo.publicKey.length} chars`);
-    } else if (deviceInfo.publicKey) {
-      console.log(`   publicKey length: undefined chars`);
-      console.log(`   publicKey is not a string!`);
+      res.json(response);
+
+      console.log(`📊 Verification summary:`);
+      console.log(`   Device: ${deviceId}`);
+      console.log(`   Phone: ${phone}`);
+      console.log(`   Security Level: ${deviceInfo.securityLevel}`);
+      console.log(`   Verification Time: ${response.verificationTime}`);
+
+      return;
     }
-    console.log(`   keyInfo: ${JSON.stringify(deviceInfo.keyInfo)}`);
 
     // 🔒 验证设备会话是否有效（基于注册时间）
     const sessionValidation =
@@ -604,10 +545,6 @@ function sendMessage(req, res) {
         requiresReregistration: true,
       });
     }
-
-    console.log(
-      `✅ Device session valid (age: ${Math.round(sessionValidation.sessionAgeMs / 1000)}s)`,
-    );
 
     // 验证nonce（防重放）
     const nonceValidation = nonceManager.validateAndRecordNonce(nonce);
@@ -639,10 +576,6 @@ function sendMessage(req, res) {
         step: verificationResult.step,
       });
     }
-
-    console.log(
-      `✅ Message verification successful for device ${deviceId}, phone: ${phone}`,
-    );
 
     const response = {
       success: true,

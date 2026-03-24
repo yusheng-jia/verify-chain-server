@@ -51,8 +51,6 @@ function isNonceUsed(nonce) {
  */
 function recordNonceUsage(nonce, timestamp = Date.now()) {
   usedNonces.set(nonce, timestamp);
-  console.log(`✔ Nonce recorded: ${nonce}`);
-  console.log(`Total nonces in use: ${usedNonces.size}`);
 }
 
 /**
@@ -120,7 +118,7 @@ function getActiveNonceCount() {
 function clearAllNonces() {
   const count = usedNonces.size;
   usedNonces.clear();
-  console.log(`🧹 Cleared all ${count} nonces`);
+  console.log(`🧹 Cleared ${count} nonces`);
 }
 
 module.exports = {

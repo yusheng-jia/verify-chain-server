@@ -35,11 +35,6 @@ function storeDeviceInfo(deviceId, deviceInfo) {
   };
 
   verifiedDevices.set(deviceId, completeDeviceInfo);
-  console.log(`✔ Device stored: ${deviceId}`);
-  console.log(`   Public key type: ${typeof completeDeviceInfo.publicKey}`);
-  console.log(
-    `   Public key present: ${completeDeviceInfo.publicKey ? "YES" : "NO"}`,
-  );
   return completeDeviceInfo;
 }
 
@@ -102,11 +97,7 @@ function updateDeviceInfo(deviceId, updates) {
  * @returns {boolean} 是否成功删除
  */
 function removeDevice(deviceId) {
-  const result = verifiedDevices.delete(deviceId);
-  if (result) {
-    console.log(`✔ Device removed: ${deviceId}`);
-  }
-  return result;
+  return verifiedDevices.delete(deviceId);
 }
 
 module.exports = {

@@ -17,9 +17,7 @@ const { SECURITY_CONFIG } = require("../config/constants");
  */
 function buildSignData(phone, timestamp, nonce) {
   // Android客户端使用的格式：query parameter style
-  const signData = `phone=${phone}&timestamp=${timestamp}&nonce=${nonce}`;
-  console.log(`📝 Built sign data: ${signData}`);
-  return signData;
+  return `phone=${phone}&timestamp=${timestamp}&nonce=${nonce}`;
 }
 
 /**
@@ -31,14 +29,6 @@ function buildSignData(phone, timestamp, nonce) {
  */
 function verifyRSASignature(data, signature, publicKeyPem) {
   try {
-    console.log(`🔍 Verifying RSA signature...`);
-    console.log(`   Data length: ${data.length} bytes`);
-    console.log(`   Signature length: ${signature.length} chars (base64)`);
-
-    // 调试：检查公钥是否存在和类型
-    console.log(`   Public key: ${publicKeyPem ? "[present]" : "[MISSING]"}`);
-    console.log(`   Public key type: ${typeof publicKeyPem}`);
-
     if (!publicKeyPem) {
       throw new Error("Public key is missing or undefined");
     }
@@ -49,19 +39,12 @@ function verifyRSASignature(data, signature, publicKeyPem) {
       );
     }
 
-    console.log(`   Public key length: ${publicKeyPem.length} chars`);
-    console.log(`   Public key preview: ${publicKeyPem.substring(0, 100)}...`);
-
     // 创建验证器
     const verifier = crypto.createVerify("SHA256");
     verifier.update(data, "utf8");
 
     // 验证签名
     const isValid = verifier.verify(publicKeyPem, signature, "base64");
-
-    console.log(
-      `${isValid ? "✅" : "❌"} RSA signature verification: ${isValid ? "VALID" : "INVALID"}`,
-    );
 
     return {
       success: true,
@@ -88,19 +71,6 @@ function validateTimestamp(timestamp) {
   const timeDiff = now - timestamp; // 注意：不用abs，区分过去/未来
   const maxAllowedDiff = SECURITY_CONFIG.TIMESTAMP_TOLERANCE;
   const maxFuture = SECURITY_CONFIG.MAX_TIMESTAMP_FUTURE;
-
-  console.log(`⏰ Timestamp validation:`);
-  console.log(`   Current time: ${new Date(now).toISOString()}`);
-  console.log(`   Request time: ${new Date(timestamp).toISOString()}`);
-  console.log(
-    `   Time difference: ${timeDiff}ms (${Math.round(timeDiff / 1000)}s)`,
-  );
-  console.log(
-    `   Max allowed past: ${maxAllowedDiff}ms (${Math.round(maxAllowedDiff / 1000)}s)`,
-  );
-  console.log(
-    `   Max allowed future: ${maxFuture}ms (${Math.round(maxFuture / 1000)}s)`,
-  );
 
   // 🔒 检查timestamp不能太旧
   if (timeDiff > maxAllowedDiff) {
@@ -140,12 +110,6 @@ function validateDeviceSession(deviceInfo) {
   const sessionAge = now - registrationTime;
   const maxSessionAge = SECURITY_CONFIG.DEVICE_SESSION_EXPIRY;
 
-  console.log(`🔐 Device session validation:`);
-  console.log(`   Current time: ${new Date(now).toISOString()}`);
-  console.log(`   Registration time: ${deviceInfo.registrationTime}`);
-  console.log(`   Session age: ${Math.round(sessionAge / 1000)}s`);
-  console.log(`   Max session age: ${Math.round(maxSessionAge / 1000)}s`);
-
   if (sessionAge > maxSessionAge) {
     return {
       isValid: false,
@@ -177,20 +141,11 @@ function validateDeviceSession(deviceInfo) {
 function verifyMessageSignature(params) {
   const { phone, timestamp, nonce, signature, publicKey } = params;
 
-  console.log(
-    `🔐 Starting complete signature verification for phone: ${phone}`,
-  );
-
   // 🔧 Validate publicKey type and extract string if needed
-  console.log(`   Public key type: ${typeof publicKey}`);
-  console.log(`   Public key present: ${publicKey ? "YES" : "NO"}`);
-
   let publicKeyString = publicKey;
   if (typeof publicKey === "object" && publicKey !== null) {
-    console.log(`   PublicKey is an object, keys: ${Object.keys(publicKey)}`);
     if (publicKey.publicKey && typeof publicKey.publicKey === "string") {
       publicKeyString = publicKey.publicKey;
-      console.log(`   ✅ Extracted PEM string from publicKey object`);
     } else {
       console.error(`   ❌ PublicKey object doesn't contain valid PEM string`);
       return {
@@ -211,10 +166,6 @@ function verifyMessageSignature(params) {
       publicKeyType: typeof publicKeyString,
     };
   }
-
-  console.log(
-    `   ✅ PublicKey validated as string (${publicKeyString.length} chars)`,
-  );
 
   // 1. 验证时间戳
   const timestampValidation = validateTimestamp(timestamp);
@@ -252,10 +203,6 @@ function verifyMessageSignature(params) {
       details: signatureVerification,
     };
   }
-
-  console.log(
-    `✅ Complete signature verification successful for phone: ${phone}`,
-  );
 
   return {
     success: true,
