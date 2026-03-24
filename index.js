@@ -20,6 +20,7 @@ const bodyParser = require("body-parser");
 
 // 导入配置和服务
 const { SECURITY_CONFIG, SERVICE_INFO } = require("./src/config/constants");
+const challengeManager = require("./src/services/challengeManager");
 const nonceManager = require("./src/services/nonceManager");
 const routeHandlers = require("./src/routes/handlers");
 
@@ -32,9 +33,11 @@ app.use(express.static("public"));
 
 // 初始化服务
 nonceManager.initNonceCleanup();
+challengeManager.initChallengeCleanup();
 
 // 📚 API路由配置
 app.get("/health", routeHandlers.healthCheck);
+app.post("/challenge", routeHandlers.issueChallenge);
 app.post("/register", routeHandlers.registerDevice);
 app.post("/sendMessage", routeHandlers.sendMessage);
 app.get("/devices", routeHandlers.getDevices);
@@ -46,6 +49,7 @@ app.listen(PORT, () => {
   console.log(`\n🚀 ${SERVICE_INFO.name}`);
   console.log(`📡 Server running on port ${PORT}`);
   console.log(`🔗 Health check: http://localhost:${PORT}/health`);
+  console.log(`🎯 Issue challenge: POST http://localhost:${PORT}/challenge`);
   console.log(`📝 Register device: POST http://localhost:${PORT}/register`);
   console.log(`✅ Send message: POST http://localhost:${PORT}/sendMessage`);
   console.log(`📊 List devices: GET http://localhost:${PORT}/devices`);

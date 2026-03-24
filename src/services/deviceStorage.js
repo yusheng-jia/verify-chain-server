@@ -19,11 +19,16 @@ function storeDeviceInfo(deviceId, deviceInfo) {
   const completeDeviceInfo = {
     deviceId,
     platform: deviceInfo.platform || "unknown",
+    keyId: deviceInfo.keyId,
     publicKey: deviceInfo.publicKey, // 存储公钥用于后续签名验证
+    attestationCertificatePublicKey: deviceInfo.attestationCertificatePublicKey,
     certificateChain: deviceInfo.certificateChain,
+    challenge: deviceInfo.challenge,
+    attestationObject: deviceInfo.attestationObject,
     keyInfo: deviceInfo.keyInfo,
     securityLevel: deviceInfo.securityLevel,
     attestation: deviceInfo.attestation,
+    assertionCounter: deviceInfo.assertionCounter || 0,
     certificateInfo: deviceInfo.certificateInfo,
     registrationTime: deviceInfo.registrationTime || new Date().toISOString(),
     isVerified: true,
@@ -55,6 +60,7 @@ function getAllDevices() {
   return Array.from(verifiedDevices.entries()).map(([deviceId, info]) => ({
     deviceId,
     platform: info.platform || "unknown",
+    keyId: info.keyId,
     registrationTime: info.registrationTime,
     isVerified: info.isVerified,
     securityLevel: info.securityLevel,
@@ -75,6 +81,21 @@ function getDeviceCount() {
   return verifiedDevices.size;
 }
 
+function updateDeviceInfo(deviceId, updates) {
+  const existing = verifiedDevices.get(deviceId);
+  if (!existing) {
+    return undefined;
+  }
+
+  const updated = {
+    ...existing,
+    ...updates,
+  };
+
+  verifiedDevices.set(deviceId, updated);
+  return updated;
+}
+
 /**
  * 删除设备信息（可选功能）
  * @param {string} deviceId - 设备ID
@@ -93,5 +114,6 @@ module.exports = {
   getDeviceInfo,
   getAllDevices,
   getDeviceCount,
+  updateDeviceInfo,
   removeDevice,
 };

@@ -11,8 +11,10 @@ const {
   SUPPORTED_PLATFORMS,
 } = require("../config/constants");
 const deviceStorage = require("../services/deviceStorage");
+const challengeManager = require("../services/challengeManager");
 const nonceManager = require("../services/nonceManager");
 const certificateVerifier = require("../services/certificateVerifier");
+const iosAppAttestService = require("../services/iosAppAttestService");
 const signatureVerifier = require("../services/signatureVerifier");
 
 /**
@@ -34,6 +36,60 @@ function healthCheck(req, res) {
   });
 }
 
+function issueChallenge(req, res) {
+  try {
+    const { deviceId, platform, purpose = "register" } = req.body || {};
+    const normalizedPlatform =
+      typeof platform === "string" ? platform.toLowerCase() : platform;
+
+    if (!deviceId || typeof deviceId !== "string") {
+      return res.status(400).json({
+        success: false,
+        error: "deviceId is required and must be a string",
+      });
+    }
+
+    if (!platform || typeof platform !== "string") {
+      return res.status(400).json({
+        success: false,
+        error: "platform is required and must be a string",
+        supportedPlatforms: SUPPORTED_PLATFORMS,
+      });
+    }
+
+    if (!SUPPORTED_PLATFORMS.includes(normalizedPlatform)) {
+      return res.status(400).json({
+        success: false,
+        error: `Unsupported platform: ${platform}`,
+        supportedPlatforms: SUPPORTED_PLATFORMS,
+      });
+    }
+
+    const challengeRecord = challengeManager.issueChallenge({
+      deviceId,
+      platform: normalizedPlatform,
+      purpose,
+    });
+
+    return res.json({
+      success: true,
+      deviceId,
+      platform: normalizedPlatform,
+      purpose,
+      challenge: challengeRecord.challenge,
+      issuedAt: new Date(challengeRecord.issuedAt).toISOString(),
+      expiresAt: new Date(challengeRecord.expiresAt).toISOString(),
+      expiresInMs: challengeRecord.expiresAt - challengeRecord.issuedAt,
+    });
+  } catch (error) {
+    console.error(`❌ Challenge issue error: ${error.message}`);
+    return res.status(500).json({
+      success: false,
+      error: "Internal server error during challenge issue",
+    });
+  }
+}
+
 /**
  * 设备注册端点（兼容原API格式）
  */
@@ -43,8 +99,15 @@ function registerDevice(req, res) {
 
   try {
     // 兼容原有的certChain格式和新的certificateChain格式
-    const { deviceId, platform, certificateChain, certChain, challenge } =
-      req.body;
+    const {
+      deviceId,
+      platform,
+      certificateChain,
+      certChain,
+      challenge,
+      keyId,
+      attestationObject,
+    } = req.body;
 
     console.log("🔍 DEBUG: Extracted parameters:");
     console.log(`   deviceId: ${deviceId}`);
@@ -52,6 +115,10 @@ function registerDevice(req, res) {
     console.log(`   certChain: ${certChain ? "[present]" : "[missing]"}`);
     console.log(
       `   certificateChain: ${certificateChain ? "[present]" : "[missing]"}`,
+    );
+    console.log(`   keyId: ${keyId ? "[present]" : "[missing]"}`);
+    console.log(
+      `   attestationObject: ${attestationObject ? "[present]" : "[missing]"}`,
     );
 
     const normalizedPlatform =
@@ -93,21 +160,6 @@ function registerDevice(req, res) {
       });
     }
 
-    if (!actualCertChain) {
-      return res.status(400).json({
-        success: false,
-        error:
-          "Certificate chain is required (certChain or certificateChain parameter)",
-      });
-    }
-
-    if (!Array.isArray(actualCertChain) || actualCertChain.length === 0) {
-      return res.status(400).json({
-        success: false,
-        error: "Certificate chain must be a non-empty array",
-      });
-    }
-
     // 检查设备是否已注册（允许重复注册以更新参数）
     const existingDevice = deviceStorage.getDeviceInfo(deviceId);
     const isUpdate = !!existingDevice;
@@ -118,11 +170,123 @@ function registerDevice(req, res) {
       );
     }
 
-    // 验证证书链和提取设备信息
-    const verificationResult = certificateVerifier.verifyAndExtractDeviceInfo({
-      platform: normalizedPlatform,
-      certificateChain: actualCertChain,
-    });
+    let verificationResult;
+
+    if (normalizedPlatform === "ios") {
+      const challengeValidation = challengeManager.validateChallenge({
+        deviceId,
+        platform: normalizedPlatform,
+        challenge,
+      });
+
+      if (!challengeValidation.isValid) {
+        return res.status(400).json({
+          success: false,
+          error: challengeValidation.error,
+          platform: "ios",
+          step: "challenge_validation",
+        });
+      }
+
+      const iosValidation = iosAppAttestService.validateRegistrationParams({
+        keyId,
+        challenge,
+        attestationObject,
+      });
+
+      if (!iosValidation.isValid) {
+        return res.status(400).json({
+          success: false,
+          error: "Invalid iOS registration parameters",
+          details: iosValidation.errors,
+        });
+      }
+
+      let iosRegistrationRecord;
+      try {
+        iosRegistrationRecord = iosAppAttestService.verifyAttestation({
+          keyId,
+          challenge,
+          attestationObject,
+        });
+
+        console.log(`🍎 iOS attestation verification succeeded: ${deviceId}`);
+      } catch (error) {
+        console.error(
+          `❌ iOS attestation verification failed for device ${deviceId}: ${error.message}`,
+        );
+
+        return res.status(400).json({
+          success: false,
+          error: error.message,
+          platform: "ios",
+          step: "attestation_verification",
+        });
+      }
+
+      verificationResult = {
+        success: true,
+        verification: {
+          attestation: iosRegistrationRecord.attestation,
+          leafCertificate: iosRegistrationRecord.certificateInfo,
+        },
+        publicKey: iosRegistrationRecord.publicKey,
+        attestationCertificatePublicKey:
+          iosRegistrationRecord.attestationCertificatePublicKey,
+        keyInfo: iosRegistrationRecord.keyInfo,
+        securityLevel: iosRegistrationRecord.securityLevel,
+        assertionCounter: iosRegistrationRecord.assertionCounter,
+      };
+
+      challengeManager.consumeChallenge({
+        deviceId,
+        platform: normalizedPlatform,
+      });
+    } else {
+      if (challenge) {
+        const androidChallengeValidation = challengeManager.validateChallenge({
+          deviceId,
+          platform: normalizedPlatform,
+          challenge,
+        });
+
+        if (!androidChallengeValidation.isValid) {
+          return res.status(400).json({
+            success: false,
+            error: androidChallengeValidation.error,
+            platform: normalizedPlatform,
+            step: "challenge_validation",
+          });
+        }
+      }
+
+      if (!actualCertChain) {
+        return res.status(400).json({
+          success: false,
+          error:
+            "Certificate chain is required (certChain or certificateChain parameter)",
+        });
+      }
+
+      if (!Array.isArray(actualCertChain) || actualCertChain.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: "Certificate chain must be a non-empty array",
+        });
+      }
+
+      verificationResult = certificateVerifier.verifyAndExtractDeviceInfo({
+        platform: normalizedPlatform,
+        certificateChain: actualCertChain,
+      });
+
+      if (challenge) {
+        challengeManager.consumeChallenge({
+          deviceId,
+          platform: normalizedPlatform,
+        });
+      }
+    }
 
     if (!verificationResult.success) {
       console.error(
@@ -135,7 +299,7 @@ function registerDevice(req, res) {
         error: verificationResult.error,
         deviceId: deviceId,
         platform: normalizedPlatform,
-        certificateChainLength: actualCertChain.length,
+        certificateChainLength: actualCertChain?.length,
       };
 
       // 如果有额外的调试信息，添加到响应中
@@ -153,10 +317,10 @@ function registerDevice(req, res) {
       // 记录详细的调试信息
       console.error(`📊 Certificate verification details:`);
       console.error(`   Device ID: ${deviceId}`);
-      console.error(`   Certificate chain length: ${actualCertChain.length}`);
+      console.error(`   Certificate chain length: ${actualCertChain?.length}`);
       console.error(`   Error: ${verificationResult.error}`);
 
-      if (actualCertChain.length > 0) {
+      if (actualCertChain?.length > 0) {
         console.error(
           `   First certificate preview: ${actualCertChain[0]?.substring(0, 100)}...`,
         );
@@ -185,23 +349,27 @@ function registerDevice(req, res) {
     const deviceInfo = {
       deviceId: deviceId,
       platform: normalizedPlatform,
+      keyId: normalizedPlatform === "ios" ? keyId : undefined,
       publicKey: verificationResult.publicKey,
-      certificateChain: actualCertChain, // 修复：使用actualCertChain而不是certificateChain
+      attestationCertificatePublicKey:
+        normalizedPlatform === "ios"
+          ? verificationResult.attestationCertificatePublicKey
+          : undefined,
+      certificateChain:
+        normalizedPlatform === "android" ? actualCertChain : undefined,
+      challenge: normalizedPlatform === "ios" ? challenge : undefined,
+      attestationObject:
+        normalizedPlatform === "ios" ? attestationObject : undefined,
       keyInfo: verificationResult.keyInfo,
       securityLevel: verificationResult.securityLevel,
       attestation: verificationResult.verification.attestation,
+      assertionCounter:
+        normalizedPlatform === "ios" ? verificationResult.assertionCounter : 0,
       certificateInfo: verificationResult.verification.leafCertificate,
       registrationTime: new Date().toISOString(),
     };
 
     // 调试：显示将要存储的设备信息
-    console.log(`🔍 DEBUG: deviceInfo to be stored:`);
-    console.log(`   deviceId: ${deviceInfo.deviceId}`);
-    console.log(
-      `   publicKey: ${deviceInfo.publicKey ? "[present]" : "[missing]"}`,
-    );
-    console.log(`   keyInfo: ${JSON.stringify(deviceInfo.keyInfo)}`);
-
     deviceStorage.storeDeviceInfo(deviceId, deviceInfo);
 
     const actionType = isUpdate ? "updated" : "registered";
@@ -221,6 +389,7 @@ function registerDevice(req, res) {
       success: true,
       deviceId: deviceId,
       platform: normalizedPlatform,
+      keyId: normalizedPlatform === "ios" ? keyId : undefined,
       action: isUpdate ? "updated" : "registered",
       registrationTime: deviceInfo.registrationTime,
       previousRegistrationTime: isUpdate
@@ -228,6 +397,10 @@ function registerDevice(req, res) {
         : undefined,
       securityLevel: deviceInfo.securityLevel,
       keyInfo: deviceInfo.keyInfo,
+      verificationMode:
+        normalizedPlatform === "ios"
+          ? "ios_app_attest"
+          : "android_attestation_certificate_chain",
       certificateInfo: {
         subject: deviceInfo.certificateInfo.subject,
         validUntil: deviceInfo.certificateInfo.validUntil,
@@ -248,7 +421,16 @@ function registerDevice(req, res) {
  */
 function sendMessage(req, res) {
   try {
-    const { deviceId, platform, phone, timestamp, nonce, signature } = req.body;
+    const {
+      deviceId,
+      platform,
+      phone,
+      timestamp,
+      nonce,
+      signature,
+      keyId,
+      assertion,
+    } = req.body;
     const normalizedPlatform =
       typeof platform === "string" ? platform.toLowerCase() : platform;
 
@@ -256,19 +438,19 @@ function sendMessage(req, res) {
       `📨 Message verification request from device: ${deviceId}, platform: ${normalizedPlatform}, phone: ${phone}`,
     );
 
-    // 参数验证
-    const paramValidation = signatureVerifier.validateSignatureParams({
+    const commonParamValidation = signatureVerifier.validateSignatureParams({
       phone,
       timestamp,
       nonce,
-      signature,
+      signature:
+        normalizedPlatform === "ios" ? "ios_assertion_placeholder" : signature,
     });
 
-    if (!paramValidation.isValid) {
+    if (!commonParamValidation.isValid) {
       return res.status(400).json({
         success: false,
         error: "Invalid parameters",
-        details: paramValidation.errors,
+        details: commonParamValidation.errors,
       });
     }
 
@@ -314,6 +496,82 @@ function sendMessage(req, res) {
         error: "Platform mismatch for registered device",
         registeredPlatform: deviceInfo.platform,
         requestPlatform: normalizedPlatform,
+      });
+    }
+
+    if (normalizedPlatform === "ios") {
+      const iosValidation = iosAppAttestService.validateAssertionParams({
+        keyId,
+        assertion,
+      });
+
+      if (!iosValidation.isValid) {
+        return res.status(400).json({
+          success: false,
+          error: "Invalid iOS message parameters",
+          details: iosValidation.errors,
+        });
+      }
+
+      if (deviceInfo.keyId && deviceInfo.keyId !== keyId) {
+        return res.status(400).json({
+          success: false,
+          error: "keyId does not match the registered iOS device",
+          registeredKeyId: deviceInfo.keyId,
+          requestKeyId: keyId,
+        });
+      }
+
+      if (!deviceInfo.publicKey) {
+        return res.status(400).json({
+          success: false,
+          error: "Registered iOS device is missing App Attest public key",
+        });
+      }
+
+      let iosVerification;
+      try {
+        iosVerification = iosAppAttestService.verifyAssertion({
+          keyId,
+          assertion,
+          phone,
+          timestamp,
+          nonce,
+          publicKey: deviceInfo.publicKey,
+          attestationCertificatePublicKey:
+            deviceInfo.attestationCertificatePublicKey,
+          previousCounter: deviceInfo.assertionCounter || 0,
+        });
+      } catch (error) {
+        return res.status(400).json({
+          success: false,
+          error: error.message,
+          platform: "ios",
+          step: "assertion_verification",
+        });
+      }
+
+      deviceStorage.updateDeviceInfo(deviceId, {
+        assertionCounter: iosVerification.signCount,
+      });
+
+      return res.json({
+        success: true,
+        deviceId,
+        platform: "ios",
+        keyId,
+        phone,
+        timestamp: new Date(timestamp).toISOString(),
+        nonce,
+        verification: {
+          assertionValid: true,
+          timestampValid: true,
+          nonceValid: true,
+          securityLevel: deviceInfo.securityLevel,
+          assertionCounter: iosVerification.signCount,
+          verificationMode: iosVerification.verificationMode,
+        },
+        verificationTime: new Date().toISOString(),
       });
     }
 
@@ -537,6 +795,7 @@ function formatUptime(seconds) {
 
 module.exports = {
   healthCheck,
+  issueChallenge,
   registerDevice,
   sendMessage,
   getDevices,
