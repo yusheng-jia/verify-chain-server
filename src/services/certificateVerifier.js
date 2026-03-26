@@ -15,52 +15,6 @@ const {
 } = require("../config/constants");
 
 /**
- * 解析Base64 DER格式证书（Android设备发送的原始格式）
- * @param {string} base64 - Base64编码的DER格式证书
- * @returns {object} forge证书对象
- */
-function parseCertFromBase64(base64) {
-  try {
-    console.log(
-      `🔄 Parsing Base64 DER certificate: ${base64.substring(0, 50)}...`,
-    );
-
-    // 清理Base64字符串
-    const cleanedBase64 = base64.trim().replace(/\s+/g, "");
-
-    // 验证Base64格式
-    if (!/^[A-Za-z0-9+/]*={0,2}$/.test(cleanedBase64)) {
-      throw new Error(`Invalid Base64 format`);
-    }
-
-    // 解码Base64为DER
-    const der = forge.util.decode64(cleanedBase64);
-
-    // 从DER解析ASN.1
-    const asn1 = forge.asn1.fromDer(der);
-
-    // 从ASN.1创建证书对象
-    const certificate = forge.pki.certificateFromAsn1(asn1);
-
-    console.log(`✅ Base64 DER certificate parsed successfully`);
-    console.log(
-      `   Subject: ${certificate.subject.getField("CN")?.value || "N/A"}`,
-    );
-    console.log(
-      `   Issuer: ${certificate.issuer.getField("CN")?.value || "N/A"}`,
-    );
-
-    return certificate;
-  } catch (error) {
-    console.error(`❌ Base64 DER certificate parsing failed:`);
-    console.error(`   Error: ${error.message}`);
-    console.error(`   Certificate preview: ${base64.substring(0, 200)}...`);
-
-    throw new Error(`Failed to parse Base64 DER certificate: ${error.message}`);
-  }
-}
-
-/**
  * 清理和规范化PEM格式证书
  * @param {string} certPem - 原始PEM格式证书
  * @returns {string} 清理后的PEM证书
@@ -123,6 +77,115 @@ function cleanPemFormat(certPem) {
   return finalPem;
 }
 
+function formatDistinguishedNameAttributes(name) {
+  if (!name || !Array.isArray(name.attributes)) {
+    return [];
+  }
+
+  return name.attributes.map((attribute) => ({
+    shortName: attribute.shortName || "N/A",
+    name: attribute.name || "N/A",
+    value: attribute.value || "N/A",
+    type: attribute.type || "N/A",
+  }));
+}
+
+function buildDistinguishedNameSearchString(name) {
+  return formatDistinguishedNameAttributes(name)
+    .flatMap((attribute) => [
+      attribute.shortName,
+      attribute.name,
+      attribute.value,
+      `${attribute.shortName}=${attribute.value}`,
+      `${attribute.name}=${attribute.value}`,
+    ])
+    .filter(Boolean)
+    .join(" ");
+}
+
+function getCertificateDerBytes(cert) {
+  return forge.asn1.toDer(forge.pki.certificateToAsn1(cert)).getBytes();
+}
+
+function getCertificateSha256Fingerprint(cert) {
+  return crypto
+    .createHash("sha256")
+    .update(Buffer.from(getCertificateDerBytes(cert), "binary"))
+    .digest("hex")
+    .toUpperCase();
+}
+
+function normalizeFingerprint(fingerprint) {
+  return fingerprint.replace(/:/g, "").toUpperCase();
+}
+
+function getPemSha256Fingerprint(pem) {
+  return normalizeFingerprint(new crypto.X509Certificate(pem).fingerprint256);
+}
+
+function getPemPublicKeySha256Fingerprint(pem) {
+  const publicKeyDer = new crypto.X509Certificate(pem).publicKey.export({
+    format: "der",
+    type: "spki",
+  });
+
+  return crypto
+    .createHash("sha256")
+    .update(publicKeyDer)
+    .digest("hex")
+    .toUpperCase();
+}
+
+function getCertificatePublicKeySha256Fingerprint(cert) {
+  const certPem = forge.pki.certificateToPem(cert);
+  return getPemPublicKeySha256Fingerprint(certPem);
+}
+
+function buildTrustedRootFingerprintSet() {
+  const fingerprints = new Set();
+
+  for (const trustedRootPem of GOOGLE_HARDWARE_ATTESTATION_ROOT_CERTS) {
+    try {
+      fingerprints.add(getPemSha256Fingerprint(trustedRootPem));
+    } catch (error) {
+      console.warn(
+        `⚠️ Failed to parse configured trusted root certificate: ${error.message}`,
+      );
+    }
+  }
+
+  return fingerprints;
+}
+
+function buildTrustedRootPublicKeyFingerprintSet() {
+  const fingerprints = new Set();
+
+  for (const trustedRootPem of GOOGLE_HARDWARE_ATTESTATION_ROOT_CERTS) {
+    try {
+      fingerprints.add(getPemPublicKeySha256Fingerprint(trustedRootPem));
+    } catch (error) {
+      console.warn(
+        `⚠️ Failed to parse configured trusted root public key: ${error.message}`,
+      );
+    }
+  }
+
+  return fingerprints;
+}
+
+function describeRootValidationMethod(validationMethod) {
+  switch (validationMethod) {
+    case "strict_match":
+      return "trusted_root_certificate_fingerprint";
+    case "strict_public_key_match":
+      return "trusted_root_public_key_for_previously_issued_root";
+    case "development_mode":
+      return "development_mode_override";
+    default:
+      return "unknown";
+  }
+}
+
 /**
  * 解析Base64 DER格式证书（Android设备发送的原始格式）
  * @param {string} base64 - Base64编码的DER格式证书
@@ -157,6 +220,12 @@ function parseCertFromBase64(base64) {
     );
     console.log(
       `   Issuer: ${certificate.issuer.getField("CN")?.value || "N/A"}`,
+    );
+    console.log(
+      `   Subject attributes: ${JSON.stringify(formatDistinguishedNameAttributes(certificate.subject))}`,
+    );
+    console.log(
+      `   Issuer attributes: ${JSON.stringify(formatDistinguishedNameAttributes(certificate.issuer))}`,
     );
 
     return certificate;
@@ -562,26 +631,44 @@ function verifyCertificateChain(certChain) {
 
     // 验证根证书 - 使用灵活的验证策略
     const rootCert = certificates[certificates.length - 1];
-    const rootCertPem = forge.pki.certificateToPem(rootCert);
+    const rootFingerprint = getCertificateSha256Fingerprint(rootCert);
+    const rootPublicKeyFingerprint =
+      getCertificatePublicKeySha256Fingerprint(rootCert);
+    const trustedRootFingerprints = buildTrustedRootFingerprintSet();
+    const trustedRootPublicKeyFingerprints =
+      buildTrustedRootPublicKeyFingerprintSet();
 
     let isGoogleRoot = false;
     let validationMethod = "";
 
-    // 方法1: 严格验证 - 与已知根证书精确匹配
+    console.log(`🔍 Root certificate fingerprint (SHA-256): ${rootFingerprint}`);
+    console.log(
+      `🔍 Root public key fingerprint (SHA-256/SPKI): ${rootPublicKeyFingerprint}`,
+    );
+
+    // 方法1: 严格验证 - 与已知可信根证书或其公钥精确匹配
     if (CERTIFICATE_VALIDATION_CONFIG.STRICT_ROOT_VALIDATION) {
-      for (const googleRootPem of GOOGLE_HARDWARE_ATTESTATION_ROOT_CERTS) {
-        if (rootCertPem.trim() === googleRootPem.trim()) {
-          isGoogleRoot = true;
-          validationMethod = "strict_match";
-          console.log(
-            `✅ Root certificate matches Google Hardware Attestation Root (strict)`,
-          );
-          break;
-        }
+      if (trustedRootFingerprints.has(rootFingerprint)) {
+        isGoogleRoot = true;
+        validationMethod = "strict_match";
+        console.log(
+          `✅ Root certificate matches a trusted attestation root fingerprint`,
+        );
+      } else if (trustedRootPublicKeyFingerprints.has(rootPublicKeyFingerprint)) {
+        isGoogleRoot = true;
+        validationMethod = "strict_public_key_match";
+        console.log(
+          `✅ Root certificate public key matches a trusted attestation root public key`,
+        );
+      } else {
+        console.warn(`⚠️ Root certificate fingerprint is not in trusted roots`);
+        console.warn(
+          `⚠️ Root public key fingerprint is not in trusted attestation root public keys`,
+        );
       }
     }
 
-    // 方法2: 灵活验证 - 基于颁发者和主题模式匹配
+    // 方法2: 诊断辅助 - 基于颁发者和主题模式匹配，仅用于日志分析
     if (
       !isGoogleRoot &&
       CERTIFICATE_VALIDATION_CONFIG.ALTERNATIVE_VALIDATION.enabled
@@ -589,25 +676,12 @@ function verifyCertificateChain(certChain) {
       const rootSubject = rootCert.subject;
       const rootIssuer = rootCert.issuer;
 
-      // 检查颁发者组织
-      const issuerOrgField = rootIssuer.getField("O");
-      const issuerCNField = rootIssuer.getField("CN");
-      const subjectOrgField = rootSubject.getField("O");
-      const subjectCNField = rootSubject.getField("CN");
-
       let issuerMatch = false;
       let subjectMatch = false;
+      const issuerString = buildDistinguishedNameSearchString(rootIssuer);
+      const subjectString = buildDistinguishedNameSearchString(rootSubject);
 
-      // 检查允许的颁发者
-      if (
-        issuerOrgField ||
-        issuerCNField ||
-        subjectOrgField ||
-        subjectCNField
-      ) {
-        const issuerString = `${issuerOrgField?.value || ""} ${issuerCNField?.value || ""}`;
-        const subjectString = `${subjectOrgField?.value || ""} ${subjectCNField?.value || ""}`;
-
+      if (issuerString || subjectString) {
         for (const allowedIssuer of CERTIFICATE_VALIDATION_CONFIG
           .ALTERNATIVE_VALIDATION.allowedIssuers) {
           if (
@@ -630,14 +704,18 @@ function verifyCertificateChain(certChain) {
       }
 
       if (issuerMatch || subjectMatch) {
-        isGoogleRoot = true;
-        validationMethod = "pattern_match";
         console.log(
-          `✅ Root certificate validated using alternative method (pattern matching)`,
+          `ℹ️ Root certificate matched diagnostic DN patterns, but this no longer grants trust`,
         );
         console.log(`   Issuer: ${rootIssuer.getField("CN")?.value || "N/A"}`);
         console.log(
           `   Subject: ${rootSubject.getField("CN")?.value || "N/A"}`,
+        );
+        console.log(
+          `   Root issuer attributes: ${JSON.stringify(formatDistinguishedNameAttributes(rootIssuer))}`,
+        );
+        console.log(
+          `   Root subject attributes: ${JSON.stringify(formatDistinguishedNameAttributes(rootSubject))}`,
         );
       }
     }
@@ -662,6 +740,18 @@ function verifyCertificateChain(certChain) {
       console.error(
         `   Organization: ${rootCert.subject.getField("O")?.value || "N/A"}`,
       );
+      console.error(
+        `   Root subject attributes: ${JSON.stringify(formatDistinguishedNameAttributes(rootCert.subject))}`,
+      );
+      console.error(
+        `   Root issuer attributes: ${JSON.stringify(formatDistinguishedNameAttributes(rootCert.issuer))}`,
+      );
+      console.error(
+        `   Root fingerprint (SHA-256): ${rootFingerprint}`,
+      );
+      console.error(
+        `   Root public key fingerprint (SHA-256/SPKI): ${rootPublicKeyFingerprint}`,
+      );
 
       return {
         isValid: false,
@@ -671,9 +761,12 @@ function verifyCertificateChain(certChain) {
           rootSubject: rootCert.subject.getField("CN")?.value || "N/A",
           rootIssuer: rootCert.issuer.getField("CN")?.value || "N/A",
           rootOrg: rootCert.subject.getField("O")?.value || "N/A",
+          rootFingerprint,
+          rootPublicKeyFingerprint,
           availableValidationMethods: [
             "strict_match",
-            "pattern_match",
+            "strict_public_key_match",
+            "diagnostic_pattern_match",
             "development_mode",
           ],
           currentConfig: CERTIFICATE_VALIDATION_CONFIG,
@@ -683,6 +776,8 @@ function verifyCertificateChain(certChain) {
 
     // 解析Attestation Extension
     const attestationResult = parseAttestationExtension(leafCert);
+    const validationMethodDescription =
+      describeRootValidationMethod(validationMethod);
 
     console.log(`✅ Certificate chain verification successful`);
     console.log(`📊 Chain length: ${certificates.length}`);
@@ -690,11 +785,15 @@ function verifyCertificateChain(certChain) {
       `🔐 Hardware attestation: ${attestationResult.success ? "Yes" : "No"}`,
     );
     console.log(`🔍 Validation method: ${validationMethod}`);
+    console.log(
+      `🔍 Validation method detail: ${validationMethodDescription}`,
+    );
 
     return {
       isValid: true,
       chainLength: certificates.length,
-      validationMethod: validationMethod,
+      validationMethod,
+      validationMethodDescription,
       leafCertificate: buildLeafCertificateSummary(leafCert),
       attestation: attestationResult,
       isGoogleHardwareAttestation: isGoogleRoot,
